@@ -13,7 +13,25 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, HttpUrl
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+
+def _validate_http_url(value: str) -> str:
+    """Lightweight URL validator used in place of `pydantic.HttpUrl`.
+
+    We intentionally avoid `HttpUrl` on fields that are sent to OpenAI's
+    structured-output mode: pydantic emits `{"type": "string", "format": "uri"}`
+    for `HttpUrl`, and OpenAI's strict JSON-schema subset rejects
+    `format: "uri"` (HTTP 400 invalid_json_schema).
+    """
+    if not isinstance(value, str):
+        raise TypeError(f"url must be a string, got {type(value).__name__}")
+    v = value.strip()
+    if not v:
+        raise ValueError("url must not be empty")
+    if not (v.startswith("http://") or v.startswith("https://")):
+        raise ValueError(f"url must start with http:// or https://, got {v!r}")
+    return v
 
 # --------------------------------------------------------------------------- #
 # Inputs (news collection)
@@ -57,7 +75,7 @@ class NewsItem(BaseModel):
     date: str = Field(
         ..., description="Publication date as ISO-8601 (YYYY-MM-DD) when known, else ''."
     )
-    url: HttpUrl
+    url: str = Field(..., description="Source URL. Must start with http:// or https://.")
     summary: str = Field(..., description="2-4 sentence neutral summary grounded in the article.")
     why_it_matters: str = Field(
         ..., description="One short paragraph: strategic / commercial / defense relevance."
@@ -68,6 +86,11 @@ class NewsItem(BaseModel):
             "Reporter's confidence the underlying claim is well-supported by the cited source(s)."
         ),
     )
+
+    @field_validator("url")
+    @classmethod
+    def _check_url(cls, v: str) -> str:
+        return _validate_http_url(v)
 
 
 class CompanyBrief(BaseModel):
@@ -120,7 +143,12 @@ class Briefing(BaseModel):
         default_factory=list,
         description="Cross-company watch list for the coming days.",
     )
-    source_list: list[HttpUrl] = Field(
+    source_list: list[str] = Field(
         default_factory=list,
         description="Deduplicated list of every URL cited in the briefing.",
     )
+
+    @field_validator("source_list")
+    @classmethod
+    def _check_source_list(cls, urls: list[str]) -> list[str]:
+        return [_validate_http_url(u) for u in urls]

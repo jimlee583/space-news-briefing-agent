@@ -212,18 +212,17 @@ def _populate_source_list(
 
     for brief in briefing.company_briefs:
         for item in brief.top_items:
-            url_str = str(item.url)
-            if url_str not in seen:
-                seen.add(url_str)
-                ordered.append(url_str)
+            if item.url and item.url not in seen:
+                seen.add(item.url)
+                ordered.append(item.url)
 
     for articles in articles_by_topic.values():
         for article in articles:
-            if article.url not in seen:
+            if article.url and article.url not in seen:
                 seen.add(article.url)
                 ordered.append(article.url)
 
-    briefing.source_list = [u for u in ordered]  # pydantic will coerce to HttpUrl
+    briefing.source_list = ordered
 
 
 def _empty_briefing(
