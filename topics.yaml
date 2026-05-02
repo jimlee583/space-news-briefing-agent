@@ -1,0 +1,57 @@
+# Tracked topics for the daily space & defense-space briefing.
+#
+# Each topic supports:
+#   name           (required)  Human-readable label, also used as a slide section
+#   queries        (required)  List of search query strings sent to the news provider.
+#                              Use double quotes inside single quotes for exact-phrase
+#                              matches, e.g. '"K2 Space"'.
+#   enabled        (optional)  Defaults to true. Set false to skip without deleting.
+#   max_articles   (optional)  Per-topic cap; overrides MAX_ARTICLES_PER_TOPIC env var.
+#
+# Add new companies by appending to the list. No code changes required.
+
+topics:
+  - name: K2 Space
+    queries:
+      - '"K2 Space"'
+      - '"K2 satellites"'
+      - '"K2 Space Corporation"'
+
+  - name: Boeing Space
+    queries:
+      - 'Boeing space'
+      - 'Boeing satellite'
+      - 'Boeing Defense space'
+      - 'Boeing Starliner'
+      - 'Boeing spacecraft'
+
+  - name: Lockheed Martin Space
+    queries:
+      - '"Lockheed Martin Space"'
+      - 'Lockheed Martin satellite'
+      - 'Lockheed Martin spacecraft'
+      - 'Lockheed Martin missile warning'
+      - 'Lockheed Martin SDA'
+
+  - name: York Space Systems
+    queries:
+      - '"York Space Systems"'
+      - 'York Space satellite'
+      - 'York Space SDA'
+      - 'York Space Systems constellation'
+
+  - name: Rocket Lab
+    queries:
+      - '"Rocket Lab"'
+      - 'Rocket Lab satellite'
+      - 'Rocket Lab spacecraft'
+      - 'Rocket Lab launch'
+      - 'Rocket Lab Neutron'
+
+  - name: Northrop Grumman Space
+    queries:
+      - '"Northrop Grumman Space"'
+      - 'Northrop Grumman satellite'
+      - 'Northrop Grumman spacecraft'
+      - 'Northrop Grumman SDA'
+      - 'Northrop Grumman missile warning'
