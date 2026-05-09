@@ -7,6 +7,8 @@ from datetime import datetime
 from typing import Any
 
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 from ..models import Article
 from .base import NewsProviderError
@@ -16,18 +18,66 @@ logger = logging.getLogger(__name__)
 _ENDPOINT = "https://newsapi.org/v2/everything"
 _TIMEOUT_SECONDS = 20
 
+# Defaults for transient-failure retries. `total=3` means up to four total
+# attempts (the original + three retries) with exponential backoff:
+#   attempt 2 after ~0.5s, attempt 3 after ~1.0s, attempt 4 after ~2.0s.
+# We retry on connection errors (DNS hiccups, TCP/TLS resets) and on the
+# server-side 5xx codes that typically clear up on their own. We deliberately
+# do NOT retry on 401 (auth — hard fail) or 429 (rate limit — surfaces with a
+# dedicated message; blindly hammering would be rude).
+_DEFAULT_RETRY_TOTAL = 3
+_DEFAULT_BACKOFF_FACTOR = 0.5
+_RETRY_STATUS_FORCELIST = (500, 502, 503, 504)
+
+
+def _build_default_session(
+    *,
+    retry_total: int,
+    backoff_factor: float,
+) -> requests.Session:
+    """Return a `requests.Session` with retry/backoff mounted on https://."""
+    retry = Retry(
+        total=retry_total,
+        connect=retry_total,
+        read=retry_total,
+        status=retry_total,
+        backoff_factor=backoff_factor,
+        status_forcelist=_RETRY_STATUS_FORCELIST,
+        allowed_methods=frozenset({"GET"}),
+        raise_on_status=False,
+        respect_retry_after_header=True,
+    )
+    adapter = HTTPAdapter(max_retries=retry)
+    session = requests.Session()
+    session.mount("https://", adapter)
+    session.mount("http://", adapter)
+    return session
+
 
 class NewsAPIProvider:
     """Thin wrapper around the NewsAPI `/v2/everything` endpoint."""
 
     name = "newsapi"
 
-    def __init__(self, api_key: str, *, language: str = "en", sort_by: str = "publishedAt") -> None:
+    def __init__(
+        self,
+        api_key: str,
+        *,
+        language: str = "en",
+        sort_by: str = "publishedAt",
+        session: requests.Session | None = None,
+        retry_total: int = _DEFAULT_RETRY_TOTAL,
+        backoff_factor: float = _DEFAULT_BACKOFF_FACTOR,
+    ) -> None:
         if not api_key:
             raise NewsProviderError("NEWS_API_KEY is required for the NewsAPI provider.")
         self._api_key = api_key
         self._language = language
         self._sort_by = sort_by
+        self._session = session or _build_default_session(
+            retry_total=retry_total,
+            backoff_factor=backoff_factor,
+        )
 
     def search(
         self,
@@ -36,7 +86,7 @@ class NewsAPIProvider:
         since: datetime,
         max_results: int,
     ) -> list[Article]:
-        params = {
+        params: dict[str, str | int] = {
             "q": query,
             "from": since.replace(microsecond=0).isoformat(),
             "language": self._language,
@@ -46,7 +96,7 @@ class NewsAPIProvider:
         headers = {"X-Api-Key": self._api_key, "User-Agent": "space-news-briefing-agent/0.1"}
 
         try:
-            response = requests.get(
+            response = self._session.get(
                 _ENDPOINT, params=params, headers=headers, timeout=_TIMEOUT_SECONDS
             )
         except requests.RequestException as exc:
