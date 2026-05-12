@@ -35,6 +35,13 @@ def _env_list(name: str, default: list[str] | None = None) -> list[str]:
     return [item.strip() for item in raw.split(",") if item.strip()]
 
 
+def _env_bool(name: str, default: bool) -> bool:
+    raw = _env_str(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
 @dataclass(frozen=True)
 class LLMConfig:
     api_key: str | None
@@ -42,7 +49,14 @@ class LLMConfig:
 
     @property
     def is_configured(self) -> bool:
-        return bool(self.api_key)
+        # Catch the obvious "still has the placeholder from .env.example" case
+        # so callers can fail fast with a clear message instead of an opaque
+        # OpenAI 401.
+        if not self.api_key:
+            return False
+        if self.api_key.strip() in {"sk-...", "sk-replace-me", "your-api-key-here"}:
+            return False
+        return True
 
 
 @dataclass(frozen=True)
@@ -51,6 +65,28 @@ class NewsConfig:
     api_key: str | None
     lookback_hours: int
     max_articles_per_topic: int
+
+
+@dataclass(frozen=True)
+class LaunchConfig:
+    """Configuration for the upcoming-launches source.
+
+    ``api_base_url`` is intentionally optional: when ``None`` the source falls
+    back to its default (The Space Devs Launch Library 2). Operators can pin a
+    private mirror or a paid plan via the env var.
+    """
+
+    api_base_url: str | None
+    lookahead_days: int
+    include_all: bool
+
+
+@dataclass(frozen=True)
+class SourcesConfig:
+    """Feature flags controlling which intelligence sources run."""
+
+    enable_news: bool
+    enable_launch: bool
 
 
 @dataclass(frozen=True)
@@ -71,9 +107,12 @@ class EmailConfig:
 class AppConfig:
     output_dir: Path
     topics_file: Path
+    events_store_path: Path
     log_level: str
     llm: LLMConfig
     news: NewsConfig
+    launch: LaunchConfig
+    sources: SourcesConfig
     email: EmailConfig
 
 
@@ -86,6 +125,9 @@ def load_config() -> AppConfig:
     """
     output_dir = Path(_env_str("OUTPUT_DIR", "output") or "output").expanduser()
     topics_file = Path(_env_str("TOPICS_FILE", "topics.yaml") or "topics.yaml").expanduser()
+    events_store_path = Path(
+        _env_str("EVENTS_STORE_PATH", "output/events.jsonl") or "output/events.jsonl"
+    ).expanduser()
 
     llm = LLMConfig(
         api_key=_env_str("OPENAI_API_KEY"),
@@ -97,6 +139,17 @@ def load_config() -> AppConfig:
         api_key=_env_str("NEWS_API_KEY"),
         lookback_hours=_env_int("LOOKBACK_HOURS", 36),
         max_articles_per_topic=_env_int("MAX_ARTICLES_PER_TOPIC", 8),
+    )
+
+    launch = LaunchConfig(
+        api_base_url=_env_str("LAUNCH_API_BASE_URL"),
+        lookahead_days=_env_int("LAUNCH_LOOKAHEAD_DAYS", 30),
+        include_all=_env_bool("INCLUDE_ALL_LAUNCHES", False),
+    )
+
+    sources = SourcesConfig(
+        enable_news=_env_bool("ENABLE_NEWS_SOURCE", True),
+        enable_launch=_env_bool("ENABLE_LAUNCH_SOURCE", True),
     )
 
     email_cfg = EmailConfig(
@@ -111,8 +164,11 @@ def load_config() -> AppConfig:
     return AppConfig(
         output_dir=output_dir,
         topics_file=topics_file,
+        events_store_path=events_store_path,
         log_level=(_env_str("LOG_LEVEL", "INFO") or "INFO").upper(),
         llm=llm,
         news=news,
+        launch=launch,
+        sources=sources,
         email=email_cfg,
     )

@@ -2,13 +2,13 @@
 
 A scheduled Python agent that, every weekday morning:
 
-1. Searches current news for a configurable list of space and defense-space
-   companies (K2 Space, Boeing Space, Lockheed Martin Space, York Space
-   Systems, Rocket Lab, Northrop Grumman Space, …).
-2. Deduplicates and normalizes the articles.
-3. Summarizes them with an LLM into a structured, grounded briefing.
-4. Generates an executive-friendly **PowerPoint deck** (`.pptx`).
-5. Emails the deck to a distribution list.
+1. Ingests intelligence from one or more **sources** (news today; launch
+   schedules now; FCC filings / SAM.gov / SDA announcements next).
+2. Normalizes everything into a common `IntelligenceEvent` shape.
+3. Deduplicates and persists the day's events to a JSONL store.
+4. Summarizes them with an LLM into a structured, grounded briefing.
+5. Generates an executive-friendly **PowerPoint deck** (`.pptx`).
+6. Emails the deck to a distribution list.
 
 The system is designed to be small, easy to extend, and easy to run either
 locally or on GitHub Actions.
@@ -20,11 +20,14 @@ locally or on GitHub Actions.
 - [Architecture](#architecture)
 - [Quick start (local)](#quick-start-local)
 - [Configuration](#configuration)
+- [Intelligence sources](#intelligence-sources)
+  - [News (NewsAPI by default)](#news-newsapi-by-default)
+  - [Upcoming launches (Launch Library 2)](#upcoming-launches-launch-library-2)
+  - [Events JSONL store](#events-jsonl-store)
 - [Adding or removing tracked companies](#adding-or-removing-tracked-companies)
 - [Running on GitHub Actions](#running-on-github-actions)
 - [Manually triggering the workflow](#manually-triggering-the-workflow)
-- [Changing the schedule](#changing-the-schedule)
-- [Swapping out the news provider](#swapping-out-the-news-provider)
+- [Adding new sources](#adding-new-sources)
 - [Project layout](#project-layout)
 - [Development](#development)
 
@@ -33,25 +36,36 @@ locally or on GitHub Actions.
 ## Architecture
 
 ```
-                    ┌─────────────────┐
-   topics.yaml ───▶ │   topics.py     │
-                    └────────┬────────┘
-                             │
-                             ▼
-   NewsAPI / RSS / …  ◀── news/collector.py ── news/registry.py
-                             │
-                             ▼
-                    ┌─────────────────┐
-                    │  summarizer.py  │  ── OpenAI structured output ──▶  Briefing
-                    └────────┬────────┘
-                             │
-                ┌────────────┴────────────┐
-                ▼                         ▼
-         deck.py (.pptx)           email_sender.py (SMTP)
+                ┌──────────────────────────────────────┐
+   topics.yaml ─▶ sources/news.py  (NewsAPI / RSS / …)  ┐
+                │                                        │
+   LL2 API ────▶ sources/launches.py                     │
+                │                                        ▼
+                │                 core/normalize.py  ──▶  IntelligenceEvent[]
+                │                                        │
+                │                 core/dedupe.py     ──▶  IntelligenceEvent[]
+                │                                        │
+                │                 core/storage.py    ──▶  output/events.jsonl
+                │                                        │
+                │                                        ▼
+                │                 summarizer.py     ──▶  Briefing (LLM)
+                │                                        │
+                ▼                                        ▼
+                main.py / pipeline.py        deck.py (.pptx)  ──▶  email_sender.py
 ```
 
-All glue lives in `pipeline.py`; the CLI in `cli.py` just parses args, loads
-config, and calls it.
+The pipeline shape is::
+
+    source-specific ingestion
+      → normalized intelligence events
+      → dedupe / persist
+      → summarize
+      → PowerPoint deck
+      → email
+
+Glue lives in `main.py` (re-exported as `pipeline.py` for backwards
+compatibility); the CLI in `cli.py` just parses args, loads config, and
+calls it.
 
 ---
 
@@ -81,6 +95,8 @@ uv run space-news-briefing
 ```
 
 The generated deck lands in `output/space_defense_news_briefing_YYYY-MM-DD.pptx`.
+Normalized events for the run are appended to `output/events.jsonl` (path
+configurable via `EVENTS_STORE_PATH`).
 
 You can also invoke it as a module:
 
@@ -88,12 +104,27 @@ You can also invoke it as a module:
 uv run python -m space_news_briefing_agent --skip-email
 ```
 
+### Test with the launch source disabled
+
+```bash
+ENABLE_LAUNCH_SOURCE=false uv run space-news-briefing --skip-email
+```
+
+### Test with the news source disabled
+
+```bash
+ENABLE_NEWS_SOURCE=false uv run space-news-briefing --skip-email
+```
+
+If both sources are disabled the pipeline still runs and emits a
+"No major updates found" deck rather than crashing.
+
 ---
 
 ## Configuration
 
-All configuration is via environment variables (loaded from `.env` if present).
-See `.env.example` for the full list. The most important ones:
+All configuration is via environment variables (loaded from `.env` if
+present). See `.env.example` for the full list. The most important ones:
 
 | Variable                   | Purpose                                                    | Default              |
 | -------------------------- | ---------------------------------------------------------- | -------------------- |
@@ -105,14 +136,77 @@ See `.env.example` for the full list. The most important ones:
 | `SMTP_USERNAME` / `_PASSWORD` | SMTP credentials                                        | _required for email_ |
 | `EMAIL_FROM`               | Optional explicit `From:`                                  | falls back to `SMTP_USERNAME` |
 | `EMAIL_TO`                 | Comma-separated recipient list                             | _required for email_ |
-| `LOOKBACK_HOURS`           | How far back to search                                     | `36`                 |
+| `LOOKBACK_HOURS`           | How far back to search news                                | `36`                 |
 | `MAX_ARTICLES_PER_TOPIC`   | Per-topic cap (overridable per topic in `topics.yaml`)     | `8`                  |
 | `OUTPUT_DIR`               | Where the deck is written                                  | `output`             |
 | `TOPICS_FILE`              | Path to topics config                                      | `topics.yaml`        |
 | `LOG_LEVEL`                | `DEBUG` / `INFO` / `WARNING` / `ERROR`                     | `INFO`               |
+| `ENABLE_NEWS_SOURCE`       | Master switch for news ingestion                           | `true`               |
+| `ENABLE_LAUNCH_SOURCE`     | Master switch for launch ingestion                         | `true`               |
+| `LAUNCH_API_BASE_URL`      | Override Launch Library 2 base URL                         | LL2 public           |
+| `LAUNCH_LOOKAHEAD_DAYS`    | Look-ahead window for upcoming launches                    | `30`                 |
+| `INCLUDE_ALL_LAUNCHES`     | If `true`, keep every upcoming launch (not just tracked)   | `false`              |
+| `EVENTS_STORE_PATH`        | JSONL store for normalized events                          | `output/events.jsonl`|
 
-CLI flags (`--date`, `--topics`, `--output-dir`, `--skip-email`, `--log-level`)
-override env vars for ad-hoc runs.
+CLI flags (`--date`, `--topics`, `--output-dir`, `--skip-email`,
+`--log-level`) override env vars for ad-hoc runs.
+
+---
+
+## Intelligence sources
+
+Each source lives under `src/space_news_briefing_agent/sources/` and exposes
+a single `fetch_*_events(cfg) -> list[IntelligenceEvent]` entry point. The
+orchestrator (`main.py`) treats sources as independent and fault-tolerant:
+**if one source fails, the rest of the pipeline still runs.**
+
+### News (NewsAPI by default)
+
+Implementation: `sources/news.py` (wraps `news/newsapi.py`).
+
+- Reads tracked companies from `topics.yaml`.
+- Calls each query against NewsAPI's `/v2/everything`.
+- Normalizes the resulting articles into `NewsArticleEvent` records via
+  `core/normalize.py`.
+- Tags entities (K2 Space, Boeing, Lockheed Martin, …) and content tags
+  (launch, satellite, constellation, missile warning, …) using simple
+  keyword matching.
+
+Disable with `ENABLE_NEWS_SOURCE=false`.
+
+### Upcoming launches (Launch Library 2)
+
+Implementation: `sources/launches.py`.
+
+- Default provider: The Space Devs **Launch Library 2** (free public
+  endpoint at `https://ll.thespacedevs.com/2.2.0`).
+- Override the base URL via `LAUNCH_API_BASE_URL` (e.g. to use the dev
+  mirror or a paid plan).
+- Pulls upcoming launches inside `LAUNCH_LOOKAHEAD_DAYS` (default 30).
+- By default keeps only launches whose provider / payload / customer
+  matches a tracked entity (Rocket Lab, SpaceX with tracked payloads, SDA,
+  Space Force, NASA, Lockheed Martin, Northrop Grumman, Boeing, York
+  Space, K2 Space). Set `INCLUDE_ALL_LAUNCHES=true` to keep everything.
+- Falls back to a small bundled mock if the API is unreachable so the
+  daily run never breaks because of a flaky upstream — see TODO note in
+  `sources/launches.py`.
+
+Disable with `ENABLE_LAUNCH_SOURCE=false`.
+
+### Events JSONL store
+
+Every run appends the day's deduped events to `output/events.jsonl`
+(configurable via `EVENTS_STORE_PATH`). Each line is a single
+`IntelligenceEvent` (or subclass) serialized via Pydantic. The file is
+git-friendly, easy to grep, and trivially loadable with `core/storage.py`:
+
+```python
+from space_news_briefing_agent.core.storage import load_events
+events = load_events("output/events.jsonl")
+```
+
+If you only want the most recent run, rotate / truncate this file from cron
+or `gh actions`.
 
 ---
 
@@ -132,25 +226,16 @@ Each topic supports:
   max_articles: 6                  # optional, overrides MAX_ARTICLES_PER_TOPIC
 ```
 
-To **temporarily mute** a topic without losing its config, set `enabled: false`.
-To **track a different YAML file** for a one-off run, pass `--topics
-path/to/other.yaml` or set `TOPICS_FILE`.
-
-After editing `topics.yaml`, do a dry run to confirm:
-
-```bash
-uv run space-news-briefing --skip-email
-```
-
-The logs will show which topics were loaded and how many articles each one
-returned.
+To **temporarily mute** a topic without losing its config, set
+`enabled: false`. To **track a different YAML file** for a one-off run,
+pass `--topics path/to/other.yaml` or set `TOPICS_FILE`.
 
 ---
 
 ## Running on GitHub Actions
 
-The workflow at `.github/workflows/daily-briefing.yml` runs the briefing on a
-weekday cron and uploads the deck as a build artifact.
+The workflow at `.github/workflows/daily-briefing.yml` runs the briefing on
+a weekday cron and uploads the deck as a build artifact.
 
 Configure these in your repository:
 
@@ -176,6 +261,11 @@ all optional, all have defaults:
 | `SMTP_PORT`              | `587`                |
 | `LOOKBACK_HOURS`         | `36`                 |
 | `MAX_ARTICLES_PER_TOPIC` | `8`                  |
+| `ENABLE_NEWS_SOURCE`     | `true`               |
+| `ENABLE_LAUNCH_SOURCE`   | `true`               |
+| `LAUNCH_API_BASE_URL`    | LL2 public           |
+| `LAUNCH_LOOKAHEAD_DAYS`  | `30`                 |
+| `INCLUDE_ALL_LAUNCHES`   | `false`              |
 
 The workflow uses `uv` for fast, reproducible installs.
 
@@ -200,67 +290,34 @@ gh workflow run daily-briefing.yml -f skip_email=true
 
 ---
 
-## Changing the schedule
+## Adding new sources
 
-Edit the `cron:` line in `.github/workflows/daily-briefing.yml`:
+The repo is structured to make new intelligence sources cheap to add. Good
+candidates next:
 
-```yaml
-on:
-  schedule:
-    - cron: "30 11 * * 1-5"   # 11:30 UTC, Mon-Fri
-```
+- **FCC filings** — public ECFS API, watch for satellite licensing /
+  earth-station applications from tracked operators.
+- **SAM.gov solicitations** — public opportunities feed; filter for
+  Space Force / SDA / NRO / SSC NAICS codes.
+- **SDA / Space Force announcements** — RSS or scraped press pages.
 
-GitHub Actions cron is **always UTC**. Examples:
+Recipe:
 
-| Local time             | UTC cron               |
-| ---------------------- | ---------------------- |
-| 07:30 ET (DST)         | `30 11 * * 1-5`        |
-| 06:00 PT (standard)    | `0 14 * * 1-5`         |
-| 09:00 CET              | `0 8 * * 1-5`          |
+1. Create `src/space_news_briefing_agent/sources/<name>.py`. Expose
+   `fetch_<name>_events(cfg) -> list[IntelligenceEvent]`. Translate the
+   provider's wire format into `IntelligenceEvent` (or a new subclass)
+   using `core/normalize.py` helpers. Catch provider errors and return
+   `[]` on failure — sources MUST NOT crash the daily pipeline.
+2. (Optional) Add provider-specific config in `config.py` and an
+   `ENABLE_<NAME>_SOURCE` flag.
+3. Wire it into `main.py` next to the existing `fetch_news_events` /
+   `fetch_launch_events` calls, behind its feature flag.
+4. (Optional) Add a new subclass to `core/models.py` if the source has
+   fields the existing types don't model.
+5. Add tests in `tests/`.
 
-Note: GitHub Actions cron triggers can be delayed by several minutes during
-peak load, so don't pick a schedule that has to be exact.
-
----
-
-## Swapping out the news provider
-
-The news layer is intentionally tiny so you can replace NewsAPI later
-(SerpAPI, Bing Search, Google Custom Search, an RSS feed, etc.).
-
-To add a new provider:
-
-1. Create `src/space_news_briefing_agent/news/<provider>.py` with a class that
-   implements the `NewsProvider` protocol from
-   `src/space_news_briefing_agent/news/base.py`:
-
-   ```python
-   class MyProvider:
-       name = "myprovider"
-
-       def __init__(self, api_key: str) -> None: ...
-
-       def search(self, query, *, since, max_results) -> list[Article]: ...
-   ```
-
-   The contract: return a list of `Article` objects with `topic_name=""`
-   (the collector fills it in), set `query` to the exact string used, and
-   raise `NewsProviderError` on auth/quota/network failures.
-
-2. Register it in `src/space_news_briefing_agent/news/registry.py`:
-
-   ```python
-   from .myprovider import MyProvider
-
-   def _build_myprovider(cfg: NewsConfig) -> NewsProvider:
-       return MyProvider(api_key=cfg.api_key or "")
-
-   _FACTORIES["myprovider"] = _build_myprovider
-   ```
-
-3. Set `NEWS_PROVIDER=myprovider` in `.env` (and as a GitHub Actions variable).
-
-The rest of the pipeline (collector, summarizer, deck, email) is provider-agnostic.
+The summarizer, deck, emailer, and storage layer require no changes for
+new sources as long as they emit `IntelligenceEvent` instances.
 
 ---
 
@@ -279,9 +336,16 @@ The rest of the pipeline (collector, summarizer, deck, email) is provider-agnost
 │   ├── cli.py                       # argparse entry point
 │   ├── config.py                    # env-var configuration
 │   ├── topics.py                    # topics.yaml loader
-│   ├── models.py                    # Pydantic: Article, NewsItem, CompanyBrief, Briefing
-│   ├── news/
-│   │   ├── __init__.py
+│   ├── models.py                    # Briefing / NewsItem / CompanyBrief / Article
+│   ├── core/                        # source-agnostic data layer
+│   │   ├── models.py                # IntelligenceEvent + subclasses, BriefingInput
+│   │   ├── normalize.py             # raw → IntelligenceEvent + entity/tag tagging
+│   │   ├── dedupe.py                # URL & title-based dedupe
+│   │   └── storage.py               # JSONL load/save/append
+│   ├── sources/                     # one module per intelligence source
+│   │   ├── news.py                  # wraps news/newsapi.py + normalize
+│   │   └── launches.py              # The Space Devs Launch Library 2 (+ mock)
+│   ├── news/                        # news-provider abstraction (legacy, used by sources/news.py)
 │   │   ├── base.py                  # NewsProvider protocol
 │   │   ├── newsapi.py               # NewsAPI implementation
 │   │   ├── registry.py              # provider factory registry
@@ -289,7 +353,8 @@ The rest of the pipeline (collector, summarizer, deck, email) is provider-agnost
 │   ├── summarizer.py                # OpenAI structured-output summarization
 │   ├── deck.py                      # python-pptx deck generator
 │   ├── email_sender.py              # SMTP email with .pptx attachment
-│   ├── pipeline.py                  # collect → summarize → render → email
+│   ├── main.py                      # orchestrator: sources → summarize → deck → email
+│   ├── pipeline.py                  # backwards-compatible alias for main.py
 │   └── logging_setup.py
 └── tests/
 ```

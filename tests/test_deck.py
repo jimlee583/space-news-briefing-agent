@@ -59,10 +59,12 @@ def test_build_deck_writes_file_with_expected_slides(tmp_path: Path) -> None:
 
     assert "Daily Space & Defense-Space News Briefing" in titles[0]
     assert "Executive Summary" in titles
-    assert "Industry Themes" in titles
+    assert "News Highlights" in titles
     assert "Defense-Space Implications" in titles
     assert any("Rocket Lab — Summary" in t for t in titles)
     assert any("K2 Space — Summary" in t for t in titles)
     assert any("Rocket Lab — Rocket Lab books" in t for t in titles)
     assert "Watch Items" in titles
     assert "Sources" in titles
+    # Without launch events the deck must NOT include a launch slide
+    assert "Upcoming Launches & Schedule Watch" not in titles
